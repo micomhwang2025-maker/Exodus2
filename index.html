@@ -1,0 +1,790 @@
+import React, { useEffect, useState } from "react";
+
+/**
+ * EXODUS: 갈라진 바다 — 덱빌딩 로그라이크 (단일 파일 프로토타입)
+ * - 컬러: 사막(메인 UI), 홍해(엔딩)
+ * - 코어 시스템: 카드/덱, 자원(빵·약초·붕대), 스트레스, 추격, 인구, 지도 진행, 사건, 점수 & 로컬 리더보드(백분위)
+ * - 코드 지향: 깔끔/간결, 주석으로 확장 가이드 제공
+ * 
+ * ✨ 2025-09-30 업데이트
+ * 1) 난이도 프리셋(쉬움/보통/어려움/악몽) 추가 — 메뉴에서 선택, 저장됨(LocalStorage)
+ * 2) 일러스트 아이콘 커스텀 훅: window.EXODUS_ICONS로 외부 SVG/이미지 교체 가능
+ * 3) Tailwind 동적 클래스 제거(카드 틴트 바) — 안전한 클래스 매핑으로 빌드 안정화
+ * 
+ * ⚙️ 이번 수정 (빌드 오류 해결)
+ * - TypeScript 문법 제거(JS로 변환): 타입 주석, 제네릭, non-null 단언(shift()! 등) 제거
+ * - drawUpTo()에서 드로우/버림 더미가 비었을 때 안전 처리
+ * - JSX 내 코드 샘플 렌더 문자열 처리 개선
+ * - 개발용 스모크 테스트(runInternalTests) 추가(콘솔에서 확인)
+ */
+
+// --------- 유틸 (JS) ---------
+const clamp = (n, min = 0, max = 100) => Math.max(min, Math.min(max, n));
+const rnd = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+// --------- 기본 아이콘 (간단 SVG) ---------
+const DefaultIcon = {
+  Bread: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><path d="M8 28c0-10 10-18 24-18s24 8 24 18v12c0 6-6 12-12 12H20C14 52 8 46 8 40V28z" fill="currentColor"/></svg>
+  ),
+  Herb: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><path d="M12 44c12-12 28-12 40-24-6 16-22 22-28 28-6 6-8 6-12 6 2-4 2-6 0-10z" fill="currentColor"/></svg>
+  ),
+  Bandage: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><rect x="8" y="28" width="48" height="8" rx="4" fill="currentColor"/><circle cx="20" cy="32" r="2" fill="#fff"/><circle cx="28" cy="32" r="2" fill="#fff"/><circle cx="36" cy="32" r="2" fill="#fff"/><circle cx="44" cy="32" r="2" fill="#fff"/></svg>
+  ),
+  People: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><circle cx="20" cy="20" r="8" fill="currentColor"/><circle cx="44" cy="20" r="8" fill="currentColor"/><rect x="10" y="32" width="44" height="16" rx="8" fill="currentColor"/></svg>
+  ),
+  Stress: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><path d="M8 40c6-8 16-12 24-12s18 4 24 12" stroke="currentColor" strokeWidth="6" fill="none"/><circle cx="24" cy="20" r="4" fill="currentColor"/><circle cx="40" cy="20" r="4" fill="currentColor"/></svg>
+  ),
+  Chase: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><path d="M8 40l12-20h8l8 10h12l8 10H8z" fill="currentColor"/></svg>
+  ),
+  Wave: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><path d="M4 40c8 0 8-8 16-8s8 8 16 8 8-8 16-8 8 8 12 8v8H4z" fill="currentColor"/></svg>
+  ),
+  Lightning: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><path d="M28 4L12 36h14l-4 24 20-32H28z" fill="currentColor"/></svg>
+  ),
+  Compass: () => (
+    <svg viewBox="0 0 64 64" className="w-5 h-5"><circle cx="32" cy="32" r="26" stroke="currentColor" strokeWidth="4" fill="none"/><path d="M44 20L28 28 20 44l16-8 8-16z" fill="currentColor"/></svg>
+  ),
+};
+
+// 전역 커스텀 아이콘 등록 (선택). 예:
+// window.EXODUS_ICONS = { Bread: "/assets/my-bread.svg" }
+function GetIcon({ name, className = "w-5 h-5" }) {
+  const custom = (typeof window !== "undefined" ? (window.EXODUS_ICONS && window.EXODUS_ICONS[name]) : undefined);
+  if (custom) {
+    if (typeof custom === "string") return <img src={custom} className={className} alt={name} />;
+    if (typeof custom === "function") return custom({ className });
+    if (React.isValidElement(custom)) return React.cloneElement(custom, { className });
+  }
+  const Comp = DefaultIcon[name];
+  return <Comp />;
+}
+
+// --------- 상수/키 ---------
+const DIFFICULTY_KEYS = ["쉬움", "보통", "어려움", "악몽"]; // UI 표시에 사용
+
+// --------- 난이도 프리셋 ---------
+// desc: 표시용, init: 시작 자원/거리 등, mods: 사건/추격/자동전진 계수, deckDelta: 시작 덱 보너스
+const DIFF_PRESETS = {
+  "쉬움": {
+    desc: "자원 넉넉, 사건 완화, 자동 전진 1",
+    init: { bread: 8, herbs: 5, bandage: 4, people: 220, stress: 12, chase: 15, maxDistance: 10 },
+    mods: { baseChaseGain: 4, stressGainPerTurn: 2, eventMul: 0.8, autoAdvance: 1 },
+    deckDelta: (ids) => [ids.prayer, ids.hide],
+  },
+  "보통": {
+    desc: "기본 밸런스",
+    init: { bread: 6, herbs: 4, bandage: 3, people: 200, stress: 15, chase: 20, maxDistance: 10 },
+    mods: { baseChaseGain: 5, stressGainPerTurn: 3, eventMul: 1.0, autoAdvance: 1 },
+  },
+  "어려움": {
+    desc: "사건↑, 추격 가속↑, 자동 전진 1",
+    init: { bread: 5, herbs: 3, bandage: 2, people: 190, stress: 18, chase: 25, maxDistance: 11 },
+    mods: { baseChaseGain: 6, stressGainPerTurn: 4, eventMul: 1.2, autoAdvance: 1 },
+  },
+  "악몽": {
+    desc: "사건↑↑, 추격 가속↑↑, 자동 전진 0",
+    init: { bread: 4, herbs: 2, bandage: 2, people: 180, stress: 20, chase: 28, maxDistance: 12 },
+    mods: { baseChaseGain: 7, stressGainPerTurn: 5, eventMul: 1.4, autoAdvance: 0 },
+  },
+};
+
+// --------- 카드 팩토리 ---------
+let autoId = 0;
+const cid = () => `C${autoId++}`;
+
+function createCards() {
+  const c = {};
+
+  const add = (card) => {
+    const id = cid();
+    c[id] = { id, ...card };
+    return id;
+  };
+
+  // 보급/안정
+  const bread = add({
+    name: "누룩 없는 빵 배급",
+    cost: 1,
+    tint: "amber-400",
+    text: "빵 -1 ➜ 스트레스 -8, 굶주림 사건 확률↓",
+    canUse: (s) => s.bread > 0,
+    use: (s) => ({ ...s, bread: s.bread - 1, stress: clamp(s.stress - 8), log: [
+      `빵을 배급했습니다. 스트레스가 줄었습니다.`,
+      ...s.log,
+    ] }),
+  });
+
+  const herb = add({
+    name: "약초 치료",
+    cost: 1,
+    tint: "emerald-400",
+    text: "약초 -1 ➜ 질병/부상 피해 완화, 스트레스 -4",
+    canUse: (s) => s.herbs > 0,
+    use: (s) => ({ ...s, herbs: s.herbs - 1, stress: clamp(s.stress - 4), log: [
+      `약초로 치료했습니다. 피해가 줄어듭니다.`,
+      ...s.log,
+    ] }),
+  });
+
+  const band = add({
+    name: "붕대 감기",
+    cost: 1,
+    tint: "rose-300",
+    text: "붕대 -1 ➜ 부상 사망 방지, 스트레스 -3",
+    canUse: (s) => s.bandage > 0,
+    use: (s) => ({ ...s, bandage: s.bandage - 1, stress: clamp(s.stress - 3), log: [
+      `붕대를 사용했습니다. 부상자 회복에 도움.`,
+      ...s.log,
+    ] }),
+  });
+
+  // 추격 회피/정찰
+  const decoy = add({
+    name: "미끼 작전",
+    cost: 1,
+    tint: "yellow-300",
+    text: "추격 -10 (최소 0)",
+    use: (s) => ({ ...s, chase: clamp(s.chase - 10), log: [
+      `미끼를 사용해 추격을 따돌렸습니다.`,
+      ...s.log,
+    ] }),
+  });
+
+  const scout = add({
+    name: "선발대 정찰",
+    cost: 1,
+    tint: "sky-300",
+    text: "추격 -5, 스트레스 -5",
+    use: (s) => ({ ...s, chase: clamp(s.chase - 5), stress: clamp(s.stress - 5), log: [
+      `정찰 성공! 안전 경로를 발견했습니다.`,
+      ...s.log,
+    ] }),
+  });
+
+  const night = add({
+    name: "야간 이동",
+    cost: 1,
+    tint: "indigo-300",
+    text: "추격 -6, 스트레스 +4",
+    use: (s) => ({ ...s, chase: clamp(s.chase - 6), stress: clamp(s.stress + 4), log: [
+      `밤을 틈타 이동했습니다. 추격이 줄었습니다(피로↑).`,
+      ...s.log,
+    ] }),
+  });
+
+  // 이동/진행
+  const march = add({
+    name: "빠른 행군",
+    cost: 2,
+    tint: "orange-300",
+    text: "거리 +1, 스트레스 +6, 추격 +4",
+    use: (s) => ({ ...s, distance: clamp(s.distance + 1, 0, s.maxDistance), stress: clamp(s.stress + 6), chase: clamp(s.chase + 4), log: [
+      `빠른 행군으로 더 전진했습니다.`,
+      ...s.log,
+    ] }),
+  });
+
+  const hide = add({
+    name: "모래언덕 은닉",
+    cost: 1,
+    tint: "amber-500",
+    text: "추격 -8, 에너지 +1(최대 초과 불가)",
+    use: (s) => ({ ...s, chase: clamp(s.chase - 8), energy: clamp(s.energy + 1, 0, s.maxEnergy), log: [
+      `모래언덕에 숨었습니다. 숨 고르기!`,
+      ...s.log,
+    ] }),
+  });
+
+  // 신앙/사기
+  const prayer = add({
+    name: "기도",
+    cost: 1,
+    tint: "cyan-300",
+    text: "스트레스 -10 (최소 0)",
+    use: (s) => ({ ...s, stress: clamp(s.stress - 10), log: [
+      `기도로 마음이 평안해졌습니다.`,
+      ...s.log,
+    ] }),
+  });
+
+  const inspire = add({
+    name: "격려",
+    cost: 0,
+    tint: "emerald-300",
+    text: "스트레스 -4",
+    use: (s) => ({ ...s, stress: clamp(s.stress - 4), log: [
+      `격려의 말이 백성들에게 힘이 되었습니다.`,
+      ...s.log,
+    ] }),
+  });
+
+  return { cards: c, ids: { bread, herb, band, decoy, scout, night, march, hide, prayer, inspire } };
+}
+
+function buildStartDeck(ids, diffKey) {
+  const base = [
+    ids.bread, ids.bread, ids.herb, ids.band,
+    ids.decoy, ids.scout, ids.night,
+    ids.march, ids.march, ids.hide,
+    ids.prayer, ids.inspire, ids.inspire,
+  ];
+  const delta = DIFF_PRESETS[diffKey].deckDelta ? DIFF_PRESETS[diffKey].deckDelta(ids) : [];
+  return [...base, ...delta];
+}
+
+// --------- 게임 초기화 ---------
+function createGame(difficulty) {
+  const { cards, ids } = createCards();
+  const deck = buildStartDeck(ids, difficulty);
+  const shuffled = shuffle(deck);
+  const draw = [...shuffled];
+  const hand = [];
+
+  const preset = DIFF_PRESETS[difficulty];
+  const init = preset.init || {};
+
+  return {
+    turn: 1,
+    energy: 3,
+    maxEnergy: 3,
+    deck,
+    discard: [],
+    draw,
+    hand,
+    cards,
+
+    bread: init.bread ?? 6,
+    herbs: init.herbs ?? 4,
+    bandage: init.bandage ?? 3,
+    people: init.people ?? 200,
+    lost: 0,
+    stress: init.stress ?? 15,
+    chase: init.chase ?? 20,
+    distance: 0,
+    maxDistance: init.maxDistance ?? 10,
+
+    log: ["출발 준비가 끝났습니다. (탈출 시작)"],
+    scene: "play",
+
+    difficulty,
+    mods: preset.mods,
+  };
+}
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// --------- 사건 시스템 ---------
+function resolveEndTurnEvents(s) {
+  let log = s.log;
+  let { people, lost, stress, chase, bread, herbs, bandage } = s;
+
+  // 기본 추격 상승 (시간 경과)
+  const baseChaseGain = s.mods.baseChaseGain + Math.floor(s.distance / 3); // 난이도 반영
+  chase = clamp(chase + baseChaseGain);
+
+  // 스트레스 자연 증가(자원 부족/피로)
+  stress = clamp(stress + s.mods.stressGainPerTurn);
+
+  // 굶주림 체크 (빵이 적으면 스트레스/사건↑)
+  if (bread <= 0 && Math.random() < 0.4) {
+    stress = clamp(stress + 8);
+    log = ["식량이 부족해 사기가 떨어졌습니다 (+스트레스).", ...log];
+  }
+
+  // 사건 확률: 스트레스/추격이 높을수록 증가 + 난이도 배수
+  const rawChance = 0.15 + stress / 200 + chase / 300;
+  const eventChance = Math.min(rawChance * s.mods.eventMul, 0.6);
+  if (Math.random() < eventChance) {
+    const roll = Math.random();
+    if (roll < 0.33) {
+      // 질병
+      let deaths = rnd(1, 5);
+      if (herbs > 0) deaths = Math.max(0, deaths - 2);
+      if (bandage > 0) deaths = Math.max(0, deaths - 1);
+      people = Math.max(0, people - deaths);
+      lost += deaths;
+      stress = clamp(stress + 6);
+      log = [
+        deaths > 0 ? `질병이 돌았습니다 (-${deaths}명).` : "질병이 돌았지만 큰 피해는 없었습니다.",
+        ...log,
+      ];
+    } else if (roll < 0.66) {
+      // 다툼
+      const leave = rnd(0, 4);
+      people = Math.max(0, people - leave);
+      lost += leave;
+      stress = clamp(stress + 5);
+      log = [
+        leave > 0 ? `내분이 발생했습니다 (-${leave}명 이탈).` : "사소한 다툼이 있었지만 수습했습니다.",
+        ...log,
+      ];
+    } else {
+      // 파라오의 압박
+      chase = clamp(chase + rnd(5, 12));
+      stress = clamp(stress + 4);
+      log = ["파라오의 병거가 속도를 냅니다 (추격↑).", ...log];
+    }
+  }
+
+  // 자동 전진 (난이도 반영)
+  const autoAdvance = s.mods.autoAdvance; // 매 턴 최소 전진
+  const distance = clamp(s.distance + autoAdvance, 0, s.maxDistance);
+
+  return { ...s, people, lost, stress, chase, bread, herbs, bandage, distance, log };
+}
+
+// --------- 점수 & 로컬 리더보드 ---------
+function calcScore(s) {
+  // 생존도, 속도, 추격 회피, 멘탈을 복합 반영
+  const survivors = s.people;
+  const speed = Math.max(0, (12 + (s.difficulty === "악몽" ? 2 : 0)) - s.turn); // 난이도 보정
+  const safety = 100 - s.chase;
+  const morale = 100 - s.stress;
+  const score = survivors * 2 + speed * 100 + safety * 5 + morale * 3;
+  return Math.max(0, Math.round(score));
+}
+
+function saveAndRank(score) {
+  const key = "exodus_scores_v1";
+  const arr = JSON.parse(localStorage.getItem(key) || "[]");
+  arr.push(score);
+  arr.sort((a, b) => b - a);
+  localStorage.setItem(key, JSON.stringify(arr));
+  const idx = arr.indexOf(score); // 동일 점수 시 첫 등장 인덱스
+  const n = arr.length;
+  const percentileTop = Math.round((1 - idx / n) * 10000) / 100; // 상위 x.xx%
+  return { rank: idx + 1, total: n, percentileTop, board: arr.slice(0, 10) };
+}
+
+// --------- 카드/턴 조작 ---------
+function drawUpTo(state, n = 5) {
+  let s = { ...state };
+  while (s.hand.length < n) {
+    if (s.draw.length === 0) {
+      if (s.discard.length === 0) break;
+      s.draw = shuffle(s.discard);
+      s.discard = [];
+    }
+    const id = s.draw.shift();
+    if (id == null) break; // 안전 가드 (TS의 ! 제거)
+    s.hand.push(id);
+  }
+  return s;
+}
+
+function startTurn(state) {
+  let s = { ...state, energy: state.maxEnergy };
+  s = drawUpTo(s, 5);
+  return s;
+}
+
+function endTurn(state) {
+  // 손패 버리고 사건 처리
+  let s = { ...state, turn: state.turn + 1, energy: state.maxEnergy };
+  s.discard = [...s.discard, ...s.hand];
+  s.hand = [];
+  s = resolveEndTurnEvents(s);
+  s = drawUpTo(s, 5);
+
+  // 승패 체크
+  if (s.chase >= 100 || s.people <= 0) {
+    return { ...s, scene: "defeat", log: ["이집트 군대에게 추격당했습니다...", ...s.log] };
+  }
+  if (s.distance >= s.maxDistance) {
+    return { ...s, scene: "victory" };
+  }
+  return s;
+}
+
+function playCard(state, id) {
+  const card = state.cards[id];
+  if (!card) return state;
+  if (state.energy < card.cost) return state;
+  if (card.canUse && !card.canUse(state)) return state;
+
+  // 자원/효과 적용
+  let s = { ...state, energy: state.energy - card.cost };
+  s = card.use(s);
+
+  // 카드 사용 후 버림 더미로 이동
+  // 한 장만 제거 (동일 ID 중 첫 번째만)
+  {
+    const hand = [...s.hand];
+    const idx = hand.indexOf(id);
+    if (idx !== -1) hand.splice(idx, 1);
+    s.hand = hand;
+  }
+  s.discard = [id, ...s.discard];
+  return s;
+}
+
+// --------- UI 컴포넌트 ---------
+function Bar({ label, val, max = 100, color }) {
+  const pct = Math.round((val / max) * 100);
+  return (
+    <div className="w-full">
+      <div className="flex items-center justify-between text-xs text-amber-100/90">
+        <span className="tracking-wider">{label}</span>
+        <span className="font-semibold">{val}/{max}</span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-amber-900/40 overflow-hidden">
+        <div className={`h-2 ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function MeterRow({ s }) {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      <div className="flex gap-2 items-center"><GetIcon name="People" /><Bar label="인구" val={s.people} max={300} color="bg-amber-300"/></div>
+      <div className="flex gap-2 items-center"><GetIcon name="Stress" /><Bar label="스트레스" val={s.stress} color="bg-rose-400"/></div>
+      <div className="flex gap-2 items-center"><GetIcon name="Chase" /><Bar label="추격" val={s.chase} color="bg-yellow-300"/></div>
+      <div className="flex gap-2 items-center"><GetIcon name="Compass" /><Bar label="거리" val={s.distance} max={s.maxDistance} color="bg-orange-400"/></div>
+      <div className="flex gap-2 items-center"><GetIcon name="Lightning" /><Bar label="에너지" val={s.energy} max={s.maxEnergy} color="bg-emerald-400"/></div>
+    </div>
+  );
+}
+
+function ResourcePills({ s }) {
+  const pill = (icon, label, val, cls) => (
+    <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold ${cls}`}>
+      <span className="opacity-90">{icon}</span>
+      <span>{label}</span>
+      <span className="opacity-90">{val}</span>
+    </div>
+  );
+  return (
+    <div className="flex flex-wrap gap-2">
+      {pill(<GetIcon name="Bread"/>, "빵", s.bread, "bg-amber-300/20 text-amber-100 border border-amber-300/30")}
+      {pill(<GetIcon name="Herb"/>, "약초", s.herbs, "bg-emerald-300/20 text-emerald-100 border border-emerald-300/30")}
+      {pill(<GetIcon name="Bandage"/>, "붕대", s.bandage, "bg-rose-300/20 text-rose-100 border border-rose-300/30")}
+      <div className="flex items-center gap-2 text-amber-100/80 text-xs">
+        <span>턴</span><span className="font-bold">{s.turn}</span>
+      </div>
+    </div>
+  );
+}
+
+function MapTrack({ s }) {
+  const nodes = Array.from({ length: s.maxDistance + 1 }, (_, i) => i);
+  return (
+    <div className="flex items-center justify-between gap-2 w-full">
+      {nodes.map((i) => (
+        <div key={i} className={`relative w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center text-[10px] sm:text-xs font-bold 
+          ${i <= s.distance ? "bg-amber-300 text-amber-950" : "bg-amber-950/40 text-amber-100/60"}`}>
+          {i}
+          {i === s.maxDistance && (
+            <div className="absolute -top-3 -right-3 text-sky-300"><GetIcon name="Wave"/></div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 안전한 틴트 클래스 매핑 (Tailwind JIT가 인식 가능하도록 리터럴로 나열)
+const TINT_BG = {
+  "amber-400": "bg-amber-400",
+  "emerald-400": "bg-emerald-400",
+  "rose-300": "bg-rose-300",
+  "yellow-300": "bg-yellow-300",
+  "sky-300": "bg-sky-300",
+  "indigo-300": "bg-indigo-300",
+  "orange-300": "bg-orange-300",
+  "amber-500": "bg-amber-500",
+  "cyan-300": "bg-cyan-300",
+  "emerald-300": "bg-emerald-300",
+  "amber-300": "bg-amber-300",
+};
+
+function CardView({ card, disabled, onPlay }) {
+  const tint = card.tint || "amber-300";
+  const tintClass = TINT_BG[tint];
+  return (
+    <button disabled={disabled} onClick={onPlay}
+      className={`group relative w-44 h-56 rounded-2xl p-3 text-left shadow-lg 
+        bg-amber-950/40 border border-amber-700/40 hover:border-amber-400/50 transition 
+        ${disabled ? "opacity-50 cursor-not-allowed" : "hover:-translate-y-0.5"}`}>
+      <div className={`absolute inset-x-0 -top-1 h-1 rounded-t-2xl ${tintClass}`}></div>
+      <div className="text-amber-100 font-bold text-sm pr-8 leading-tight">{card.name}</div>
+      <div className="absolute top-3 right-3 w-8 h-8 rounded-full bg-amber-900/60 border border-amber-600/50 flex items-center justify-center text-amber-100 font-extrabold">{card.cost}</div>
+      <div className="mt-3 text-[13px] text-amber-100/90 leading-snug">{card.text}</div>
+      <div className="absolute bottom-3 left-3 text-[10px] uppercase tracking-wider text-amber-200/60">Action</div>
+    </button>
+  );
+}
+
+function Log({ s }) {
+  return (
+    <div className="h-40 overflow-auto rounded-xl p-3 bg-amber-950/40 border border-amber-700/40 text-amber-100 text-sm space-y-2">
+      {s.log.map((l, i) => (
+        <div key={i} className="opacity-90">• {l}</div>
+      ))}
+    </div>
+  );
+}
+
+function TopBar() {
+  return (
+    <div className="flex items-center justify-between">
+      <div className="text-amber-100 text-xl sm:text-2xl font-extrabold tracking-wide flex items-center gap-2">
+        <span>EXODUS</span>
+        <span className="text-amber-300/90">/ 갈라진 바다</span>
+      </div>
+      <div className="text-amber-200/70 text-xs sm:text-sm">덱빌딩 로그라이크 웹게임 프로토타입</div>
+    </div>
+  );
+}
+
+// --------- 내부 스모크 테스트 (UI에 영향 없음, 콘솔 확인) ---------
+function runInternalTests() {
+  try {
+    const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+    // clamp
+    assert(clamp(120, 0, 100) === 100, "clamp upper bound");
+    assert(clamp(-5, 0, 10) === 0, "clamp lower bound");
+    // game init
+    const g = createGame("보통");
+    assert(Array.isArray(g.deck) && g.deck.length >= 10, "deck initialized");
+    // ensure inspire playable and reduces stress
+    let s = startTurn(g);
+    const inspireId = Object.keys(s.cards).find((id) => s.cards[id].name === "격려");
+    if (inspireId) {
+      s.hand.push(inspireId);
+      const before = s.stress;
+      const s2 = playCard(s, inspireId);
+      assert(s2.stress <= before, "'격려' should not increase stress");
+    // 중복 '격려'가 손패에 2장 있을 때, 한 번 사용하면 정확히 1장만 사라져야 함
+    let sDup = { ...g, energy: 10, hand: [inspireId, inspireId], draw: [], discard: [] };
+    const sDup2 = playCard(sDup, inspireId);
+    const remain = sDup2.hand.filter((x) => x === inspireId).length;
+    assert(remain === 1, "'격려' should remove exactly one copy from hand");
+    assert(sDup2.discard[0] === inspireId, "'격려' should be added to discard");
+  }
+    // draw guard when empty
+    const s3 = drawUpTo({ ...g, draw: [], discard: [], hand: [] }, 1);
+    assert(s3.hand.length === 0, "drawUpTo should handle empty piles");
+    // shuffle integrity
+    const arr = [1,2,3,4,5];
+    const sh = shuffle(arr);
+    assert(sh.sort().join(',') === '1,2,3,4,5', "shuffle keeps elements");
+    console.log("✅ Internal smoke tests passed");
+  } catch (e) {
+    console.error("❌ Internal tests failed:", e);
+  }
+}
+
+// --------- 메인 게임 컴포넌트 ---------
+export default function App() {
+  const savedDiff = (typeof window !== "undefined" && (localStorage.getItem("exodus_diff"))) || "보통";
+  const [difficulty, setDifficulty] = useState(savedDiff);
+  const [state, setState] = useState({ scene: "menu" });
+  const [result, setResult] = useState(null);
+
+  const startGame = () => {
+    const g = createGame(difficulty);
+    setState(startTurn(g));
+    setResult(null);
+    if (typeof window !== "undefined") localStorage.setItem("exodus_diff", difficulty);
+  };
+
+  useEffect(() => {
+    // 스모크 테스트 1회 실행 (개발 편의)
+    runInternalTests();
+  }, []);
+
+  useEffect(() => {
+    if (state.scene === "victory") {
+      const score = calcScore(state);
+      const { percentileTop, rank, total, board } = saveAndRank(score);
+      setResult({ score, percentile: percentileTop, rank, total, board });
+    }
+  }, [state.scene]);
+
+  const play = (id) => setState((s) => playCard(s, id));
+  const end = () => setState((s) => endTurn(s));
+  const canPlay = (c) => state.energy >= c.cost && (!c.canUse || c.canUse(state));
+
+  // 배경 (사막/바다)
+  const desertBg = "bg-gradient-to-b from-amber-950 via-amber-900 to-amber-800";
+  const seaBg = "bg-gradient-to-b from-sky-900 via-sky-700 to-sky-600";
+
+  if (state.scene === "menu") {
+    return (
+      <div className={`min-h-screen ${desertBg} p-6 sm:p-8`}>
+        <div className="max-w-6xl mx-auto space-y-8">
+          <TopBar />
+
+          <div className="grid lg:grid-cols-2 gap-8 items-center">
+            <div className="space-y-6">
+              <h1 className="text-amber-100 text-3xl sm:text-4xl font-extrabold">모세와 함께 홍해로</h1>
+              <p className="text-amber-100/90 leading-relaxed">
+                이집트의 추격을 피해 백성을 이끌고 홍해까지 전진하세요. 빵·약초·붕대를 현명하게 배분하고,
+                스트레스와 사건을 관리해 최대한 많은 사람을 안전하게 이끄는 것이 목표입니다.
+              </p>
+
+              {/* 난이도 선택 */}
+              <div className="space-y-2">
+                <div className="text-amber-200/80 text-sm">난이도</div>
+                <div className="flex flex-wrap gap-2">
+                  {DIFFICULTY_KEYS.map((k) => (
+                    <button key={k}
+                      onClick={() => setDifficulty(k)}
+                      className={`px-3 py-2 rounded-xl text-sm border ${k === difficulty ? "bg-amber-300 text-amber-950 border-amber-400" : "bg-amber-950/30 text-amber-100 border-amber-700/40 hover:border-amber-400/40"}`}>
+                      {k}
+                    </button>
+                  ))}
+                </div>
+                <div className="text-amber-200/70 text-xs">{DIFF_PRESETS[difficulty].desc}</div>
+              </div>
+
+              <ul className="text-amber-200/80 text-sm list-disc pl-5 space-y-1">
+                <li>사막 컬러 테마(노란 계열) · 엔딩은 홍해의 파란 테마</li>
+                <li>추격 지수는 시간이 갈수록 상승 — ‘미끼 작전’, ‘선발대 정찰’ 등으로 낮추기</li>
+                <li>로컬 리더보드로 점수 상위 %가 표시됩니다</li>
+                <li>아이콘 교체: <code>window.EXODUS_ICONS = {'{ Bread: "/img/bread.svg", ... }'}</code></li>
+              </ul>
+              <button onClick={startGame} className="px-5 py-3 rounded-2xl bg-amber-300 text-amber-950 font-extrabold shadow hover:shadow-lg">
+                여정 시작
+              </button>
+            </div>
+            <div className="rounded-3xl border border-amber-700/40 p-6 bg-amber-950/30">
+              <div className="text-amber-200/80 text-sm mb-3">시연 스크린샷 (샘플 UI)</div>
+              <div className="aspect-video rounded-2xl bg-amber-900/50 flex items-center justify-center">
+                <div className="text-amber-200/70">사막 위 행렬… 모래바람… (미니맵/카드 UI)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state.scene === "victory") {
+    return (
+      <div className={`min-h-screen ${seaBg} p-6 sm:p-8`}>
+        <div className="max-w-6xl mx-auto space-y-6">
+          <div className="flex items-center justify-between">
+            <div className="text-sky-100 text-2xl sm:text-3xl font-extrabold tracking-wide flex items-center gap-2">
+              <span>홍해가 갈라졌습니다!</span>
+              <GetIcon name="Wave" />
+            </div>
+            <button onClick={startGame} className="px-4 py-2 rounded-xl bg-sky-300 text-sky-950 font-bold">다시 도전</button>
+          </div>
+
+          <div className="grid lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 rounded-3xl p-6 bg-sky-900/30 border border-sky-400/30 text-sky-100 space-y-4">
+              <h2 className="text-xl font-extrabold">엔딩 메시지</h2>
+              <p className="leading-relaxed">이집트 군대는 홍해 물살에 휩쓸려 전멸하였습니다. 당신은 많은 백성을 안전하게 이끌었습니다.</p>
+              {result && (
+                <div className="grid grid-cols-2 gap-4 text-sky-100/90">
+                  <div className="p-4 rounded-2xl bg-sky-950/40 border border-sky-400/20">
+                    <div className="text-xs opacity-80">최종 점수</div>
+                    <div className="text-3xl font-extrabold">{result.score}</div>
+                  </div>
+                  <div className="p-4 rounded-2xl bg-sky-950/40 border border-sky-400/20">
+                    <div className="text-xs opacity-80">상위 퍼센트</div>
+                    <div className="text-3xl font-extrabold">상위 {result.percentile.toFixed(2)}%</div>
+                  </div>
+                  <div className="p-4 rounded-2xl bg-sky-950/40 border border-sky-400/20 col-span-2">
+                    <div className="text-xs opacity-80 mb-2">로컬 리더보드 Top 10</div>
+                    <ol className="list-decimal pl-5 space-y-1 text-sm">
+                      {result.board.map((v, i) => (<li key={i}>{v}</li>))}
+                    </ol>
+                    <div className="text-xs opacity-70 mt-2">(브라우저 로컬 저장 기반)</div>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="rounded-3xl p-6 bg-sky-900/30 border border-sky-400/30 text-sky-100 space-y-3">
+              <div className="text-sm opacity-90">결과 요약</div>
+              <div className="text-sm opacity-90">생존 인구: {state.people}</div>
+              <div className="text-sm opacity-90">손실(이탈/사망): {state.lost}</div>
+              <div className="text-sm opacity-90">최종 스트레스: {state.stress}</div>
+              <div className="text-sm opacity-90">최종 추격: {state.chase}</div>
+              <div className="text-sm opacity-90">소요 턴: {state.turn}</div>
+              <div className="text-sm opacity-90">난이도: {state.difficulty}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state.scene === "defeat") {
+    return (
+      <div className={`min-h-screen ${desertBg} p-6 sm:p-8`}>
+        <div className="max-w-4xl mx-auto space-y-6">
+          <div className="text-amber-100 text-2xl sm:text-3xl font-extrabold">패배… 추격을 피하지 못했습니다</div>
+          <div className="rounded-3xl p-6 bg-amber-950/30 border border-amber-700/40 text-amber-100 space-y-2">
+            <div>생존 인구: {state.people} / 손실: {state.lost}</div>
+            <div>최종 스트레스: {state.stress} · 최종 추격: {state.chase} · 소요 턴: {state.turn}</div>
+          </div>
+          <button onClick={() => startGame()} className="px-5 py-3 rounded-2xl bg-amber-300 text-amber-950 font-extrabold">다시 시도</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ----- 플레이 화면 -----
+  return (
+    <div className={`min-h-screen ${desertBg} p-6 sm:p-8`}>
+      <div className="max-w-7xl mx-auto space-y-6">
+        <TopBar />
+
+        <div className="grid lg:grid-cols-3 gap-6">
+          {/* 좌: 상태 & 지도 */}
+          <div className="lg:col-span-2 space-y-4">
+            <MeterRow s={state} />
+            <ResourcePills s={state} />
+            <div className="rounded-3xl p-4 bg-amber-950/30 border border-amber-700/40">
+              <div className="text-amber-200/80 text-sm mb-2">경로 진행</div>
+              <MapTrack s={state} />
+            </div>
+          </div>
+
+          {/* 우: 로그 */}
+          <div className="space-y-3">
+            <div className="rounded-3xl p-4 bg-amber-950/30 border border-amber-700/40">
+              <div className="text-amber-200/80 text-sm mb-2">사건 로그</div>
+              <Log s={state} />
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setState(startTurn)} className="px-4 py-2 rounded-xl bg-amber-300 text-amber-950 font-bold">손패 보충</button>
+              <button onClick={end} className="px-4 py-2 rounded-xl bg-amber-100/90 text-amber-950 font-bold border border-amber-700/40">턴 종료</button>
+            </div>
+          </div>
+        </div>
+
+        {/* 손패 */}
+        <div className="rounded-3xl p-4 bg-amber-950/30 border border-amber-700/40">
+          <div className="text-amber-200/80 text-sm mb-3">손패 (에너지 {state.energy}/{state.maxEnergy})</div>
+          <div className="flex flex-wrap gap-3">
+            {state.hand.map((id, idx) => (
+              <CardView key={`${id}-${idx}`} card={state.cards[id]} disabled={!canPlay(state.cards[id])} onPlay={() => setState((s) => playCard(s, id))} />
+            ))}
+          </div>
+          <div className="mt-3 text-amber-200/70 text-xs">드로우 {state.draw.length} · 버림 {state.discard.length}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 타입 정의 없이도 동작하도록 전역 선언(선택):
+// window.EXODUS_ICONS = window.EXODUS_ICONS || {};
