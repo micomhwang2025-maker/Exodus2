@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>EXODUS — 갈라진 바다 (Legacy Safe)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js" crossorigin></script>
+    <style>
+      html,body,#root { height: 100%; }
+      body { margin:0; background:#0b0a07; }
+      #error-overlay { position: fixed; inset: 0; display:none; padding:16px; background: rgba(0,0,0,0.9); color:#fff; z-index:99999; overflow:auto; }
+      #error-overlay pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="error-overlay"><div class="max-w-3xl mx-auto">
+      <h2 class="text-red-400 text-xl font-bold mb-2">⚠️ 런타임 오류</h2>
+      <pre id="error-text" class="text-sm"></pre>
+    </div></div>
+
+    <script>
+      (function(){
+        function show(msg){
+          var o=document.getElementById('error-overlay'), t=document.getElementById('error-text');
+          if(o&&t){ t.textContent=String(msg||'Unknown error'); o.style.display='block'; }
+        }
+        window.addEventListener('error',function(e){ show((e.error&&e.error.stack)||e.message||e.filename+':'+e.lineno); });
+        window.addEventListener('unhandledrejection',function(e){ show((e.reason&&e.reason.stack)||String(e.reason)); });
+      })();
+    </script>
+
+    <script>
+      var h = React.createElement;
+      var html = htm.bind(h);
+
+      function clamp(n, min, max){
+        if(min==null) min=0; if(max==null) max=100;
+        return Math.max(min, Math.min(max, n));
+      }
+      function rnd(min, max){
+        return Math.floor(Math.random()*(max-min+1))+min;
+      }
+
+      var DIFFICULTY_KEYS = ["쉬움","보통","어려움","악몽"];
+      var DIFF_PRESETS = {
+        "쉬움": { desc:"자원 넉넉, 사건 완화, 자동 전진 1",
+          init:{ bread:8, herbs:5, bandage:4, people:220, stress:12, chase:15, maxDistance:10 },
+          mods:{ baseChaseGain:4, stressGainPerTurn:2, eventMul:0.8, autoAdvance:1 },
+          deckDelta:function(ids){ return [ids.prayer, ids.hide]; }
+        },
+        "보통": { desc:"기본 밸런스",
+          init:{ bread:6, herbs:4, bandage:3, people:200, stress:15, chase:20, maxDistance:10 },
+          mods:{ baseChaseGain:5, stressGainPerTurn:3, eventMul:1.0, autoAdvance:1 }
+        },
+        "어려움": { desc:"사건↑, 추격 가속↑, 자동 전진 1",
+          init:{ bread:5, herbs:3, bandage:2, people:190, stress:18, chase:25, maxDistance:11 },
+          mods:{ baseChaseGain:6, stressGainPerTurn:4, eventMul:1.2, autoAdvance:1 }
+        },
+        "악몽": { desc:"사건↑↑, 추격 가속↑↑, 자동 전진 0",
+          init:{ bread:4, herbs:2, bandage:2, people:180, stress:20, chase:28, maxDistance:12 },
+          mods:{ baseChaseGain:7, stressGainPerTurn:5, eventMul:1.4, autoAdvance:0 }
+        }
+      };
+
+      var autoId = 0;
+      function cid(){ return "C"+(autoId++); }
+
+      function logPrepend(log, msg){
+        var out = [msg];
+        for(var i=0;i<log.length;i++) out.push(log[i]);
+        return out;
+      }
+
+      function createCards(){
+        var c = {};
+        function add(card){
+          var id = cid();
+          var copy = {};
+          for (var k in card) if (Object.prototype.hasOwnProperty.call(card,k)) copy[k]=card[k];
+          copy.id = id;
+          c[id] = copy;
+          return id;
+        }
+        var bread = add({ name:"누룩 없는 빵 배급", cost:1, tint:"amber-400", text:"빵 -1 ➜ 스트레스 -8, 굶주림 사건 확률↓",
+          canUse:function(s){ return s.bread>0; },
+          use:function(s){ return assignObj(s,{ bread:s.bread-1, stress:clamp(s.stress-8), log:logPrepend(s.log,"빵을 배급했습니다. 스트레스가 줄었습니다.") }); }
+        });
+        var herb  = add({ name:"약초 치료", cost:1, tint:"emerald-400", text:"약초 -1 ➜ 질병/부상 피해 완화, 스트레스 -4",
+          canUse:function(s){ return s.herbs>0; },
+          use:function(s){ return assignObj(s,{ herbs:s.herbs-1, stress:clamp(s.stress-4), log:logPrepend(s.log,"약초로 치료했습니다. 피해가 줄어듭니다.") }); }
+        });
+        var band  = add({ name:"붕대 감기", cost:1, tint:"rose-300", text:"붕대 -1 ➜ 부상 사망 방지, 스트레스 -3",
+          canUse:function(s){ return s.bandage>0; },
+          use:function(s){ return assignObj(s,{ bandage:s.bandage-1, stress:clamp(s.stress-3), log:logPrepend(s.log,"붕대를 사용했습니다. 부상자 회복에 도움.") }); }
+        });
+        var decoy = add({ name:"미끼 작전", cost:1, tint:"yellow-300", text:"추격 -10 (최소 0)",
+          use:function(s){ return assignObj(s,{ chase:clamp(s.chase-10), log:logPrepend(s.log,"미끼를 사용해 추격을 따돌렸습니다.") }); }
+        });
+        var scout = add({ name:"선발대 정찰", cost:1, tint:"sky-300", text:"추격 -5, 스트레스 -5",
+          use:function(s){ return assignObj(s,{ chase:clamp(s.chase-5), stress:clamp(s.stress-5), log:logPrepend(s.log,"정찰 성공! 안전 경로를 발견했습니다.") }); }
+        });
+        var night = add({ name:"야간 이동", cost:1, tint:"indigo-300", text:"추격 -6, 스트레스 +4",
+          use:function(s){ return assignObj(s,{ chase:clamp(s.chase-6), stress:clamp(s.stress+4), log:logPrepend(s.log,"밤을 틈타 이동했습니다. 추격이 줄었습니다(피로↑).") }); }
+        });
+        var march = add({ name:"빠른 행군", cost:2, tint:"orange-300", text:"거리 +1, 스트레스 +6, 추격 +4",
+          use:function(s){ return assignObj(s,{ distance:clamp(s.distance+1,0,s.maxDistance), stress:clamp(s.stress+6), chase:clamp(s.chase+4), log:logPrepend(s.log,"빠른 행군으로 더 전진했습니다.") }); }
+        });
+        var hide  = add({ name:"모래언덕 은닉", cost:1, tint:"amber-500", text:"추격 -8, 에너지 +1(최대 초과 불가)",
+          use:function(s){ return assignObj(s,{ chase:clamp(s.chase-8), energy:clamp(s.energy+1,0,s.maxEnergy), log:logPrepend(s.log,"모래언덕에 숨었습니다. 숨 고르기!") }); }
+        });
+        var prayer= add({ name:"기도", cost:1, tint:"cyan-300", text:"스트레스 -10 (최소 0)",
+          use:function(s){ return assignObj(s,{ stress:clamp(s.stress-10), log:logPrepend(s.log,"기도로 마음이 평안해졌습니다.") }); }
+        });
+        var inspire= add({ name:"격려", cost:0, tint:"emerald-300", text:"스트레스 -4",
+          use:function(s){ return assignObj(s,{ stress:clamp(s.stress-4), log:logPrepend(s.log,"격려의 말이 백성들에게 힘이 되었습니다.") }); }
+        });
+        return { cards:c, ids:{ bread:bread, herb:herb, band:band, decoy:decoy, scout:scout, night:night, march:march, hide:hide, prayer:prayer, inspire:inspire } };
+      }
+
+      function buildStartDeck(ids, diffKey){
+        var base=[ ids.bread, ids.bread, ids.herb, ids.band, ids.decoy, ids.scout, ids.night, ids.march, ids.march, ids.hide, ids.prayer, ids.inspire, ids.inspire ];
+        var delta=(DIFF_PRESETS[diffKey] && DIFF_PRESETS[diffKey].deckDelta) ? DIFF_PRESETS[diffKey].deckDelta(ids) : [];
+        return base.concat(delta);
+      }
+
+      function shuffle(arr){
+        var a=arr.slice();
+        for(var i=a.length-1;i>0;i--){
+          var j=Math.floor(Math.random()*(i+1));
+          var t=a[i]; a[i]=a[j]; a[j]=t;
+        }
+        return a;
+      }
+
+      function assignObj(s, delta){
+        // returns shallow-cloned object with overrides (no spread)
+        var out={};
+        var k;
+        for(k in s) if(Object.prototype.hasOwnProperty.call(s,k)) out[k]=s[k];
+        for(k in delta) if(Object.prototype.hasOwnProperty.call(delta,k)) out[k]=delta[k];
+        return out;
+      }
+
+      function createGame(difficulty){
+        var ci = createCards();
+        var cards = ci.cards, ids = ci.ids;
+        var deck = buildStartDeck(ids, difficulty);
+        var draw = shuffle(deck);
+        var preset = DIFF_PRESETS[difficulty] || { init:{}, mods:{ baseChaseGain:5, stressGainPerTurn:3, eventMul:1.0, autoAdvance:1 } };
+        var init = preset.init || {};
+        return {
+          turn:1, energy:3, maxEnergy:3,
+          deck:deck, discard:[], draw:draw, hand:[], cards:cards,
+          bread:(init.bread!=null?init.bread:6),
+          herbs:(init.herbs!=null?init.herbs:4),
+          bandage:(init.bandage!=null?init.bandage:3),
+          people:(init.people!=null?init.people:200),
+          lost:0, stress:(init.stress!=null?init.stress:15),
+          chase:(init.chase!=null?init.chase:20),
+          distance:0, maxDistance:(init.maxDistance!=null?init.maxDistance:10),
+          log:["출발 준비가 끝났습니다. (탈출 시작)"],
+          scene:"menu", difficulty:difficulty, mods:preset.mods
+        };
+      }
+
+      function drawUpTo(s, n){
+        if(n==null) n=5;
+        var hs = s.hand.slice();
+        var dr = s.draw.slice();
+        var dc = s.discard.slice();
+        var ss = assignObj(s, { hand: hs, draw: dr, discard: dc });
+        while (ss.hand.length < n){
+          if (ss.draw.length === 0){
+            if (ss.discard.length === 0) break;
+            ss.draw = shuffle(ss.discard);
+            ss.discard = [];
+          }
+          var id = ss.draw.shift();
+          if (id == null) break;
+          ss.hand.push(id);
+        }
+        return ss;
+      }
+
+      function startTurn(s){
+        s = assignObj(s, { energy: s.maxEnergy, scene: "play" });
+        return drawUpTo(s, 5);
+      }
+
+      function resolveEndTurnEvents(s){
+        var log = s.log.slice();
+        var people=s.people, lost=s.lost, stress=s.stress, chase=s.chase, bread=s.bread, herbs=s.herbs, bandage=s.bandage;
+        var baseChaseGain = s.mods.baseChaseGain + Math.floor(s.distance/3);
+        chase = clamp(chase + baseChaseGain);
+        stress = clamp(stress + s.mods.stressGainPerTurn);
+        if (bread<=0 && Math.random()<0.4){
+          stress = clamp(stress + 8);
+          log.unshift("식량이 부족해 사기가 떨어졌습니다 (+스트레스).");
+        }
+        var rawChance = 0.15 + stress/200 + chase/300;
+        var eventChance = Math.min(rawChance * s.mods.eventMul, 0.6);
+        if (Math.random() < eventChance){
+          var roll = Math.random();
+          if (roll < 0.33){
+            var deaths = rnd(1,5);
+            if (herbs>0) deaths = Math.max(0, deaths-2);
+            if (bandage>0) deaths = Math.max(0, deaths-1);
+            people = Math.max(0, people - deaths);
+            lost += deaths;
+            stress = clamp(stress + 6);
+            log.unshift(deaths>0 ? ("질병이 돌았습니다 (-"+deaths+"명).") : "질병이 돌았지만 큰 피해는 없었습니다.");
+          } else if (roll < 0.66){
+            var leave = rnd(0,4);
+            people = Math.max(0, people - leave);
+            lost += leave;
+            stress = clamp(stress + 5);
+            log.unshift(leave>0 ? ("내분이 발생했습니다 (-"+leave+"명 이탈).") : "사소한 다툼이 있었지만 수습했습니다.");
+          } else {
+            chase = clamp(chase + rnd(5,12));
+            stress = clamp(stress + 4);
+            log.unshift("파라오의 병거가 속도를 냅니다 (추격↑).");
+          }
+        }
+        var distance = clamp(s.distance + s.mods.autoAdvance, 0, s.maxDistance);
+        return assignObj(s, { people:people, lost:lost, stress:stress, chase:chase, bread:bread, herbs:herbs, bandage:bandage, distance:distance, log:log });
+      }
+
+      function endTurn(s){
+        var ss = assignObj(s, { turn:s.turn+1, energy:s.maxEnergy });
+        ss.discard = ss.discard.concat(ss.hand);
+        ss.hand = [];
+        ss = resolveEndTurnEvents(ss);
+        ss = drawUpTo(ss, 5);
+        if (ss.chase >= 100 || ss.people <= 0) return assignObj(ss, { scene:"defeat", log: logPrepend(ss.log, "이집트 군대에게 추격당했습니다...") });
+        if (ss.distance >= ss.maxDistance) return assignObj(ss, { scene:"victory" });
+        return ss;
+      }
+
+      function playCard(state, id){
+        var card = state.cards[id];
+        if (!card) return state;
+        if (state.energy < card.cost) return state;
+        if (card.canUse && !card.canUse(state)) return state;
+        var s = assignObj(state, { energy: state.energy - card.cost });
+        s = card.use(s);
+        var hand = s.hand.slice();
+        var idx = hand.indexOf(id);
+        if (idx !== -1) hand.splice(idx, 1);
+        s.hand = hand;
+        s.discard = [id].concat(s.discard);
+        return s;
+      }
+
+      var TINT_BG = { "amber-400":"bg-amber-400","emerald-400":"bg-emerald-400","rose-300":"bg-rose-300","yellow-300":"bg-yellow-300","sky-300":"bg-sky-300","indigo-300":"bg-indigo-300","orange-300":"bg-orange-300","amber-500":"bg-amber-500","cyan-300":"bg-cyan-300","emerald-300":"bg-emerald-300","amber-300":"bg-amber-300" };
+
+      function Bar(props){
+        var label=props.label, val=props.val, max=(props.max!=null?props.max:100), color=props.color;
+        var pct = Math.round((val / max) * 100);
+        return html`<div class="w-full">
+          <div class="flex items-center justify-between text-xs text-amber-100/90">
+            <span class="tracking-wider">${label}</span>
+            <span class="font-semibold">${val}/${max}</span>
+          </div>
+          <div class="h-2 w-full rounded-full bg-amber-900/40 overflow-hidden">
+            <div class=${"h-2 "+color} style=${{width: pct+"%"}}></div>
+          </div>
+        </div>`;
+      }
+
+      function MeterRow(props){
+        var s=props.s;
+        return html`<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          <div class="flex gap-2 items-center">${Bar({label:"인구", val:s.people, max:300, color:"bg-amber-300"})}</div>
+          <div class="flex gap-2 items-center">${Bar({label:"스트레스", val:s.stress, color:"bg-rose-400"})}</div>
+          <div class="flex gap-2 items-center">${Bar({label:"추격", val:s.chase, color:"bg-yellow-300"})}</div>
+          <div class="flex gap-2 items-center">${Bar({label:"거리", val:s.distance, max:s.maxDistance, color:"bg-orange-400"})}</div>
+          <div class="flex gap-2 items-center">${Bar({label:"에너지", val:s.energy, max:s.maxEnergy, color:"bg-emerald-400"})}</div>
+        </div>`;
+      }
+
+      function ResourcePills(props){
+        var s=props.s;
+        function pill(label,val,cls){ return html`<div class=${"flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold "+cls}>
+          <span>${label}</span><span class="opacity-90">${val}</span></div>`; }
+        return html`<div class="flex flex-wrap gap-2">
+          ${pill("빵",s.bread,"bg-amber-300/20 text-amber-100 border border-amber-300/30")}
+          ${pill("약초",s.herbs,"bg-emerald-300/20 text-emerald-100 border border-emerald-300/30")}
+          ${pill("붕대",s.bandage,"bg-rose-300/20 text-rose-100 border border-rose-300/30")}
+          <div class="flex items-center gap-2 text-amber-100/80 text-xs"><span>턴</span><span class="font-bold">${s.turn}</span></div>
+        </div>`;
+      }
+
+      function MapTrack(props){
+        var s=props.s;
+        var nodes = []; for (var i=0;i<=s.maxDistance;i++) nodes.push(i);
+        return html`<div class="flex items-center justify-between gap-2 w-full">
+          ${nodes.map(function(i){
+            return html`<div class=${"relative w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center text-[10px] sm:text-xs font-bold "+(i<=s.distance?"bg-amber-300 text-amber-950":"bg-amber-950/40 text-amber-100/60")}>${i}
+              ${i===s.maxDistance? html`<div class="absolute -top-3 -right-3 text-sky-300">🌊</div>`:null}
+            </div>`;
+          })}
+        </div>`;
+      }
+
+      function CardView(props){
+        var card=props.card, disabled=props.disabled, onPlay=props.onPlay;
+        var tintClass = TINT_BG[card.tint||"amber-300"];
+        return html`<button disabled=${disabled} onClick=${onPlay}
+          class=${"group relative w-44 h-56 rounded-2xl p-3 text-left shadow-lg bg-amber-950/40 border border-amber-700/40 hover:border-amber-400/50 transition "+(disabled?"opacity-50 cursor-not-allowed":"hover:-translate-y-0.5")}>
+          <div class=${"absolute inset-x-0 -top-1 h-1 rounded-t-2xl "+tintClass}></div>
+          <div class="text-amber-100 font-bold text-sm pr-8 leading-tight">${card.name}</div>
+          <div class="absolute top-3 right-3 w-8 h-8 rounded-full bg-amber-900/60 border border-amber-600/50 flex items-center justify-center text-amber-100 font-extrabold">${card.cost}</div>
+          <div class="mt-3 text-[13px] text-amber-100/90 leading-snug">${card.text}</div>
+          <div class="absolute bottom-3 left-3 text-[10px] uppercase tracking-wider text-amber-200/60">Action</div>
+        </button>`;
+      }
+
+      function Log(props){
+        var s=props.s;
+        return html`<div class="h-40 overflow-auto rounded-xl p-3 bg-amber-950/40 border border-amber-700/40 text-amber-100 text-sm space-y-2">
+          ${s.log.map(function(l,i){ return html`<div key=${i} class="opacity-90">• ${l}</div>`; })}
+        </div>`;
+      }
+
+      function TopBar(){
+        return html`<div class="flex items-center justify-between">
+          <div class="text-amber-100 text-xl sm:text-2xl font-extrabold tracking-wide flex items-center gap-2">
+            <span>EXODUS</span><span class="text-amber-300/90">/ 갈라진 바다</span>
+          </div>
+          <div class="text-amber-200/70 text-xs sm:text-sm">덱빌딩 로그라이크 웹게임 프로토타입</div>
+        </div>`;
+      }
+
+      function App(){
+        var savedDiff = (typeof window!=="undefined" && localStorage.getItem("exodus_diff")) || "보통";
+        var _stateHooks = React.useState(savedDiff);
+        var difficulty = _stateHooks[0], setDifficulty = _stateHooks[1];
+        var _state2 = React.useState(createGame(savedDiff));
+        var state = _state2[0], setState = _state2[1];
+        var _state3 = React.useState(null);
+        var result = _state3[0], setResult = _state3[1];
+
+        function startGame(){
+          var g = createGame(difficulty);
+          var s = startTurn(g);
+          setState(s);
+          setResult(null);
+          try{ localStorage.setItem("exodus_diff", difficulty); }catch(e){}
+        }
+
+        React.useEffect(function(){
+          if(state.scene==="victory"){
+            var survivors = state.people;
+            var speed = Math.max(0, (12 + (state.difficulty==="악몽"?2:0)) - state.turn);
+            var safety = 100 - state.chase;
+            var morale = 100 - state.stress;
+            var score = survivors*2 + speed*100 + safety*5 + morale*3;
+            score = Math.max(0, Math.round(score));
+            var key="exodus_scores_v1", arr=[];
+            try{ arr=JSON.parse(localStorage.getItem(key)||"[]"); }catch(e){}
+            arr.push(score); arr.sort(function(a,b){ return b-a; });
+            try{ localStorage.setItem(key, JSON.stringify(arr)); }catch(e){}
+            var idx=arr.indexOf(score), n=arr.length;
+            var percentileTop = Math.round((1 - idx/n)*10000)/100;
+            setResult({ score:score, percentile:percentileTop, rank:idx+1, total:n, board:arr.slice(0,10) });
+          }
+        }, [state.scene]);
+
+        function canPlay(c){ return state.energy>=c.cost && (!c.canUse || c.canUse(state)); }
+
+        var desertBg = "bg-gradient-to-b from-amber-950 via-amber-900 to-amber-800";
+        var seaBg = "bg-gradient-to-b from-sky-900 via-sky-700 to-sky-600";
+
+        if(state.scene==="menu"){
+          return html`<div class=${"min-h-screen "+desertBg+" p-6 sm:p-8"}>
+            <div class="max-w-6xl mx-auto space-y-8">
+              ${TopBar()}
+              <div class="grid lg:grid-cols-2 gap-8 items-center">
+                <div class="space-y-6">
+                  <h1 class="text-amber-100 text-3xl sm:text-4xl font-extrabold">모세와 함께 홍해로</h1>
+                  <p class="text-amber-100/90 leading-relaxed">이집트의 추격을 피해 백성을 이끌고 홍해까지 전진하세요.</p>
+                  <div class="space-y-2">
+                    <div class="text-amber-200/80 text-sm">난이도</div>
+                    <div class="flex flex-wrap gap-2">
+                      ${DIFFICULTY_KEYS.map(function(k){
+                        return html`<button key=${k} onClick=${function(){ setDifficulty(k); }}
+                          class=${"px-3 py-2 rounded-xl text-sm border "+(k===difficulty?"bg-amber-300 text-amber-950 border-amber-400":"bg-amber-950/30 text-amber-100 border-amber-700/40 hover:border-amber-400/40")}>${k}</button>`;
+                      })}
+                    </div>
+                    <div class="text-amber-200/70 text-xs">${DIFF_PRESETS[difficulty].desc}</div>
+                  </div>
+                  <button onClick=${startGame} class="px-5 py-3 rounded-2xl bg-amber-300 text-amber-950 font-extrabold shadow hover:shadow-lg">여정 시작</button>
+                </div>
+                <div class="rounded-3xl border border-amber-700/40 p-6 bg-amber-950/30">
+                  <div class="text-amber-200/80 text-sm mb-3">시연 스크린샷 (샘플 UI)</div>
+                  <div class="aspect-video rounded-2xl bg-amber-900/50 flex items-center justify-center">
+                    <div class="text-amber-200/70">사막 위 행렬… 모래바람…</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>`;
+        }
+
+        if(state.scene==="victory"){
+          return html`<div class=${"min-h-screen "+seaBg+" p-6 sm:p-8"}>
+            <div class="max-w-6xl mx-auto space-y-6">
+              <div class="flex items-center justify-between">
+                <div class="text-sky-100 text-2xl sm:text-3xl font-extrabold tracking-wide flex items-center gap-2">
+                  <span>홍해가 갈라졌습니다!</span><span>🌊</span>
+                </div>
+                <button onClick=${startGame} class="px-4 py-2 rounded-xl bg-sky-300 text-sky-950 font-bold">다시 도전</button>
+              </div>
+              ${result? html`<div class="text-sky-100 text-sm">점수: ${result.score} · 상위 ${result.percentile.toFixed(2)}%</div>`:null}
+            </div>
+          </div>`;
+        }
+
+        if(state.scene==="defeat"){
+          return html`<div class=${"min-h-screen "+desertBg+" p-6 sm:p-8"}>
+            <div class="max-w-4xl mx-auto space-y-6">
+              <div class="text-amber-100 text-2xl sm:text-3xl font-extrabold">패배… 추격을 피하지 못했습니다</div>
+              <button onClick=${startGame} class="px-5 py-3 rounded-2xl bg-amber-300 text-amber-950 font-extrabold">다시 시도</button>
+            </div>
+          </div>`;
+        }
+
+        return html`<div class=${"min-h-screen "+desertBg+" p-6 sm:p-8"}>
+          <div class="max-w-7xl mx-auto space-y-6">
+            ${TopBar()}
+            <div class="grid lg:grid-cols-3 gap-6">
+              <div class="lg:col-span-2 space-y-4">
+                ${MeterRow({s:state})}
+                ${ResourcePills({s:state})}
+                <div class="rounded-3xl p-4 bg-amber-950/30 border border-amber-700/40">
+                  <div class="text-amber-200/80 text-sm mb-2">경로 진행</div>
+                  ${MapTrack({s:state})}
+                </div>
+              </div>
+              <div class="space-y-3">
+                <div class="rounded-3xl p-4 bg-amber-950/30 border border-amber-700/40">
+                  <div class="text-amber-200/80 text-sm mb-2">사건 로그</div>
+                  ${Log({s:state})}
+                </div>
+                <div class="flex gap-3">
+                  <button onClick=${function(){ setState(startTurn); }} class="px-4 py-2 rounded-xl bg-amber-300 text-amber-950 font-bold">손패 보충</button>
+                  <button onClick=${function(){ setState(endTurn); }} class="px-4 py-2 rounded-xl bg-amber-100/90 text-amber-950 font-bold border border-amber-700/40">턴 종료</button>
+                </div>
+              </div>
+            </div>
+            <div class="rounded-3xl p-4 bg-amber-950/30 border border-amber-700/40">
+              <div class="text-amber-200/80 text-sm mb-3">손패 (에너지 ${state.energy}/${state.maxEnergy})</div>
+              <div class="flex flex-wrap gap-3">
+                ${state.hand.map(function(id, idx){
+                  return CardView({ card: state.cards[id], disabled: !(state.energy>=state.cards[id].cost && (!state.cards[id].canUse || state.cards[id].canUse(state))), onPlay: function(){ setState(function(s){ return playCard(s, id); }); } });
+                })}
+              </div>
+              <div class="mt-3 text-amber-200/70 text-xs">드로우 ${state.draw.length} · 버림 ${state.discard.length}</div>
+            </div>
+          </div>
+        </div>`;
+      }
+
+      (function mount(){
+        try{
+          var rootEl = document.getElementById('root');
+          var root = ReactDOM.createRoot(rootEl);
+          root.render(html`<${App} />`);
+        }catch(e){
+          var o=document.getElementById('error-overlay'), t=document.getElementById('error-text');
+          if(o&&t){ t.textContent = e.stack || String(e); o.style.display='block'; }
+          throw e;
+        }
+      })();
+    </script>
+  </body>
+</html>
